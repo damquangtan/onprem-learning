@@ -10,7 +10,7 @@ DAY=$(grep -o '[0-9]*' $STATE_FILE)
 echo "📅 Ngày học: $DAY"
 echo "----------------------------------"
 
-# ROADMAP 30 NGÀY
+# ROADMAP 30 NGÀY - NETWORKING & LINUX
 TOPICS=(
 "ping và ICMP"
 "TCP vs UDP"
@@ -44,8 +44,61 @@ TOPICS=(
 "Tổng hợp hệ thống"
 )
 
-TOPIC=${TOPICS[$((DAY-1))]}
+# ROADMAP BARE METAL
+TOPICS_BARE_METAL=(
+"Bare metal là gì và so sánh với VM"
+"BIOS và UEFI"
+"RAID: các loại và cách chọn"
+"Network bonding và teaming"
+"IPMI và quản lý server từ xa"
+"Cài OS từ PXE boot"
+"Disk partitioning và LVM"
+"Filesystem: ext4 vs xfs vs btrfs"
+"NFS và mount network storage"
+"iSCSI và SAN cơ bản"
+"Kernel tuning và sysctl"
+"Hardware troubleshooting"
+"Firmware update và driver"
+"Power management và NUMA"
+"Monitoring phần cứng: ipmitool, smartctl"
+)
 
+# ROADMAP KUBERNETES
+TOPICS_K8S=(
+"Kubernetes architecture: control plane và worker node"
+"Pod là gì và vòng đời pod"
+"Deployment và ReplicaSet"
+"Service: ClusterIP, NodePort, LoadBalancer"
+"ConfigMap và Secret"
+"Persistent Volume và Persistent Volume Claim"
+"Namespace và RBAC"
+"Ingress và Ingress Controller"
+"DaemonSet và StatefulSet"
+"Resource requests và limits"
+"Liveness và Readiness probe"
+"HorizontalPodAutoscaler"
+"kubectl debug và troubleshoot"
+"Helm cơ bản"
+"Network Policy"
+"etcd và backup cluster"
+"Kubernetes storage: StorageClass"
+"Node affinity và taints/tolerations"
+"CI/CD với Kubernetes"
+"Debug pod crash và OOMKilled"
+)
+
+if [ "$DAY" -le 30 ]; then
+  SECTION="Networking & Linux"
+  TOPIC=${TOPICS[$((DAY-1))]}
+elif [ "$DAY" -le 45 ]; then
+  SECTION="Bare Metal"
+  TOPIC=${TOPICS_BARE_METAL[$((DAY-31))]}
+else
+  SECTION="Kubernetes"
+  TOPIC=${TOPICS_K8S[$((DAY-46))]}
+fi
+
+echo "📚 Section: $SECTION"
 echo "🧠 Chủ đề hôm nay: $TOPIC"
 echo ""
 
