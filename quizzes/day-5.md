@@ -1,53 +1,57 @@
-Dưới đây là 3 câu quiz về SSH cơ bản:
-
----
+# 📝 Quiz: SSH cơ bản
 
 ## Câu 1 (trắc nghiệm)
 
-Lệnh nào dùng để kết nối SSH vào server `192.168.1.10` với user `admin` qua port `2222`?
+Bạn thử `ssh ubuntu@10.0.0.5` và nhận lỗi: `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!`. Điều gì đã xảy ra?
 
-a) `ssh admin@192.168.1.10 -p 2222`
-b) `ssh -port 2222 admin@192.168.1.10`
-c) `ssh admin:2222@192.168.1.10`
-d) `ssh 192.168.1.10 -u admin -p 2222`
+a) Mật khẩu của user ubuntu đã bị đổi trên server
+b) SSH key của bạn đã hết hạn và cần tạo mới
+c) SSH key fingerprint của server khác với lần trước — server có thể đã reinstall OS, hoặc đây là MITM attack
+d) Bạn cần update phiên bản SSH client
 
-**Đáp án: a) `ssh admin@192.168.1.10 -p 2222`**
+**Đáp án: c)**
+
+**Giải thích:**
+- Lần đầu SSH đến server, SSH client lưu fingerprint (dấu vân tay) của server vào `~/.ssh/known_hosts`. Lần sau nếu fingerprint khác → cảnh báo.
+- Nguyên nhân phổ biến: server reinstall OS (tạo SSH key mới), hoặc thực sự đang bị tấn công MITM (ai đó chen vào giữa).
+- Cách xử lý: xác nhận với admin server rằng server đã reinstall, rồi xóa entry cũ: `ssh-keygen -R 10.0.0.5`
+- a) Sai — đổi mật khẩu không ảnh hưởng SSH host key.
+- b) Sai — SSH key không có ngày hết hạn.
+- d) Sai — không liên quan đến phiên bản client.
 
 ---
 
 ## Câu 2 (trắc nghiệm)
 
-File nào trên server chứa danh sách public key được phép đăng nhập SSH không cần mật khẩu?
+Sau khi chạy `ssh-copy-id ubuntu@server`, bạn vẫn bị hỏi mật khẩu khi SSH. Nguyên nhân nào sau đây KHÔNG phải là nguyên nhân có thể?
 
-a) `~/.ssh/id_rsa.pub`
-b) `~/.ssh/known_hosts`
-c) `~/.ssh/authorized_keys`
-d) `/etc/ssh/ssh_config`
+a) File `~/.ssh/authorized_keys` trên server có permission sai (ví dụ: 777)
+b) Private key trên máy bạn có permission 644 thay vì 600
+c) Server chưa cài OpenSSH
+d) `PubkeyAuthentication no` trong `/etc/ssh/sshd_config` của server
 
-**Đáp án: c) `~/.ssh/authorized_keys`**
+**Đáp án: c) Server chưa cài OpenSSH**
 
-> `id_rsa.pub` là public key của client; `known_hosts` lưu fingerprint server đã kết nối; `ssh_config` là cấu hình phía client. Server đọc `authorized_keys` để xác thực key-based login.
+**Giải thích:**
+- Nếu server chưa cài OpenSSH thì bạn không thể SSH vào từ đầu, kể cả bằng mật khẩu. Vậy đây không phải lý do "vẫn bị hỏi mật khẩu sau ssh-copy-id".
+- a) Có thể xảy ra — SSH daemon từ chối đọc `authorized_keys` nếu permission quá rộng (phải là 600 hoặc 644).
+- b) Có thể xảy ra — SSH client từ chối dùng private key nếu permission quá rộng (phải là 600).
+- d) Có thể xảy ra — nếu PubkeyAuthentication tắt thì key-based login không hoạt động.
 
 ---
 
 ## Câu 3 (tự luận)
 
-Bạn tạo cặp key SSH bằng `ssh-keygen` và copy public key lên server, nhưng khi SSH vẫn bị hỏi mật khẩu. Nêu ít nhất 3 nguyên nhân phổ biến và cách kiểm tra/sửa từng nguyên nhân.
+Giải thích tại sao SSH key authentication an toàn hơn password authentication. Cơ chế nào giúp private key không bao giờ phải truyền qua mạng?
 
 **Đáp án gợi ý:**
 
-1. **Quyền file/thư mục sai trên server** — SSH rất khắt khe về permission:
-   - `~/.ssh/` phải là `700`: `chmod 700 ~/.ssh`
-   - `~/.ssh/authorized_keys` phải là `600`: `chmod 600 ~/.ssh/authorized_keys`
+Password: khi login, bạn gửi mật khẩu lên server để server kiểm tra. Dù SSH mã hóa kết nối, mật khẩu vẫn đến tay server. Nếu server bị compromise → mật khẩu bị lộ. Hacker có thể brute force thử hàng nghìn mật khẩu tự động.
 
-2. **Public key chưa được copy đúng** — Kiểm tra nội dung:
-   - `cat ~/.ssh/authorized_keys` trên server, so sánh với `cat ~/.ssh/id_rsa.pub` trên client
-   - Dùng `ssh-copy-id user@server` để copy tự động và an toàn
+SSH key: Private key **không bao giờ rời khỏi máy bạn**. Cơ chế hoạt động:
+1. Server tạo một "challenge" ngẫu nhiên, mã hóa bằng public key của bạn
+2. Chỉ private key mới giải mã được challenge đó
+3. Bạn ký kết quả bằng private key, gửi lại
+4. Server verify chữ ký bằng public key → xác nhận bạn có private key
 
-3. **Server chưa bật xác thực bằng key** — Kiểm tra `/etc/ssh/sshd_config`:
-   - `PubkeyAuthentication yes` phải được bật
-   - Sau khi sửa: `systemctl restart sshd`
-
----
-
-Bạn có muốn lưu vào file `quizzes/ssh-basics.md` không?
+Kể cả nếu ai nghe được toàn bộ traffic → họ chỉ thấy challenge và chữ ký, không có private key. Không thể brute force vì cần giải bài toán toán học cực khó không có private key.

@@ -2,176 +2,152 @@
 
 ## 📖 Giải thích
 
-DNS (Domain Name System) là "danh bạ điện thoại" của internet — chuyển đổi tên miền dễ nhớ (`google.com`) thành địa chỉ IP máy tính hiểu được (`142.250.185.46`).
+Hãy tưởng tượng bạn muốn gọi điện cho một người bạn. Bạn không nhớ số điện thoại của họ, nhưng bạn biết tên họ. Bạn tra danh bạ điện thoại → tìm ra số → gọi.
 
-### Luồng xử lý khi bạn gõ `google.com`:
+**DNS (Domain Name System)** là danh bạ của internet:
+- Bạn nhớ tên: `google.com`
+- Máy tính cần địa chỉ IP: `142.250.x.x`
+- DNS là người dịch từ tên → địa chỉ IP
 
-```
-Browser → OS Cache → Recursive Resolver (ISP/8.8.8.8)
-         → Root Nameserver (.) 
-         → TLD Nameserver (.com)
-         → Authoritative Nameserver (google.com)
-         → Trả về IP
-```
+Không có DNS, bạn phải nhớ IP của mọi website bạn muốn vào — không thực tế.
 
-**Chi tiết từng bước:**
+### Cấu trúc phân cấp của DNS
 
-| Bước | Ai xử lý | Làm gì |
-|------|----------|--------|
-| 1 | OS/Browser | Kiểm tra cache local (`/etc/hosts`, browser cache) |
-| 2 | Recursive Resolver | Nhận yêu cầu, đi hỏi thay client |
-| 3 | Root Nameserver | "`.com`? Hỏi nameserver này đi" |
-| 4 | TLD Nameserver | "`google.com`? Hỏi nameserver này đi" |
-| 5 | Authoritative NS | "IP của `google.com` là `142.250.x.x`" |
-| 6 | Cache + trả về | Resolver cache lại theo TTL, trả IP cho client |
-
-### Các loại DNS Record quan trọng:
+DNS không phải một server duy nhất — nó là hệ thống phân cấp:
 
 ```
-A       → domain → IPv4          (google.com → 142.250.185.46)
-AAAA    → domain → IPv6
-CNAME   → alias → domain thật    (www.google.com → google.com)
-MX      → mail server
-TXT     → metadata (SPF, DKIM, verify ownership)
-NS      → nameserver của domain
-PTR     → reverse DNS (IP → domain)
+Root DNS Servers (13 cụm máy chủ gốc, quản lý ".")
+    │
+    ├── TLD Servers (Top Level Domain)
+    │       .com, .vn, .org, .net...
+    │
+    └── Authoritative DNS Servers
+            google.com → 142.250.x.x
+            facebook.com → 31.13.x.x
 ```
 
----
+### Luồng DNS query từ đầu đến cuối
+
+Khi bạn gõ `google.com` vào browser:
+
+```
+Browser → [Cache local?] → Có → Dùng luôn
+                         → Không → OS Cache → Có → Dùng luôn
+                                             → Không → /etc/hosts → Có → Dùng luôn
+                                                                  → Không → DNS Resolver (thường là router hoặc 8.8.8.8)
+                                                                              │
+                                                                              ├── Hỏi Root Server: ".com ở đâu?"
+                                                                              ├── Root trả lời: "Hỏi TLD .com server"
+                                                                              ├── Hỏi TLD .com: "google.com ở đâu?"
+                                                                              ├── TLD trả lời: "Hỏi ns1.google.com"
+                                                                              ├── Hỏi ns1.google.com: "google.com là IP gì?"
+                                                                              └── Nhận: 142.250.x.x → Cache lại → Trả về browser
+```
+
+Quá trình này thường xảy ra trong vài millisecond vì DNS Resolver **cache** kết quả.
+
+### TTL (Time To Live) trong DNS
+
+Mỗi DNS record có TTL — thời gian được phép cache (đơn vị: giây):
+- TTL = 300 → cache 5 phút, sau đó phải query lại
+- TTL thấp → thay đổi DNS lan truyền nhanh, nhưng nhiều query hơn
+- TTL cao → ít query hơn, nhưng khi thay đổi IP phải chờ lâu mới có hiệu lực
+
+## 🧠 Tại sao cần biết điều này?
+
+**Tình huống thực tế bạn sẽ gặp:**
+
+1. Deploy app mới, đổi DNS trỏ sang server mới → tại sao một số user vẫn vào server cũ? (DNS cache chưa expire)
+2. Trong Kubernetes, service discovery dùng DNS nội bộ → pod không tìm được service khác → debug DNS
+3. App kết nối DB bằng hostname → DNS resolution fail → connection error
+4. `nslookup` và `dig` là công cụ đầu tiên khi debug network issues
 
 ## 🧪 Ví dụ thực tế
 
-**Tình huống:** Bạn deploy app lên server mới, trỏ domain về IP mới.
+**Tình huống 1:** Đổi IP server, cập nhật DNS record, nhưng sau 1 giờ một số user vẫn bị redirect sang server cũ.
 
-```
-Trước: api.myapp.com → 103.1.2.3  (server cũ)
-Sau:   api.myapp.com → 103.9.9.9  (server mới)
-```
+→ Nguyên nhân: DNS record cũ có TTL = 3600 (1 giờ). Những user query trước khi bạn đổi đang dùng cache cũ. Phải chờ TTL expire. Bài học: **trước khi deploy migration, hạ TTL xuống 300 trước vài giờ**.
 
-Bạn update DNS record lúc 10:00 AM. Nhưng đồng nghiệp vẫn bị lỗi lúc 10:30 AM vì:
-- TTL của record cũ là 3600s (1 tiếng)
-- Resolver của họ đang cache IP cũ
-- Phải chờ TTL hết hạn mới fetch lại
+**Tình huống 2:** Trong Kubernetes, pod không connect được service khác:
+```bash
+# Trong pod:
+curl http://my-service:8080/health
+# → curl: (6) Could not resolve host: my-service
 
-**Lesson:** Trước khi migrate, hạ TTL xuống 60-300s trước 24h để rollout nhanh hơn.
-
----
-
-**Tình huống 2:** CNAME vs A record
-
-```
-# Dùng CNAME cho subdomain trỏ về load balancer
-app.mycompany.com  CNAME  → lb-prod.aws.amazon.com
-                           (AWS tự quản lý IP thay đổi)
-
-# Dùng A record khi biết IP cố định
-admin.mycompany.com  A  → 10.0.0.5
+# Debug DNS trong pod:
+nslookup my-service
+# → Server: 10.96.0.10 (CoreDNS)
+# → ** server can't find my-service: NXDOMAIN
+# → DNS không biết my-service → service chưa tạo, hoặc sai namespace
 ```
 
----
-
-## 💻 Command
+## 💻 Command (giải thích từng dòng)
 
 ```bash
-# Tra cứu DNS cơ bản
+# Query DNS cơ bản — tìm IP của domain
 nslookup google.com
+# Output: Name: google.com, Address: 142.250.x.x
+
+# dig — chi tiết hơn nslookup, dùng nhiều khi debug
 dig google.com
+# +ANSWER SECTION: google.com. 300 IN A 142.250.x.x
+#                              │        │ └── IP address
+#                              │        └──── A record (IPv4)
+#                              └──────────── TTL còn lại: 300 giây
 
-# Xem toàn bộ record
-dig google.com ANY
+# Query loại record cụ thể
+dig google.com A      # IPv4 address
+dig google.com AAAA   # IPv6 address
+dig google.com MX     # Mail server
+dig google.com TXT    # Text records (SPF, DKIM...)
+dig google.com NS     # Name servers
 
-# Xem record cụ thể
-dig google.com A
-dig google.com MX
-dig google.com TXT
+# Query đến một DNS server cụ thể (thay vì dùng DNS mặc định của hệ thống)
+dig @8.8.8.8 google.com
+# @ : chỉ định DNS server để hỏi (8.8.8.8 = Google DNS)
 
-# Hỏi thẳng một nameserver cụ thể (bypass cache local)
-dig @8.8.8.8 google.com A
-
-# Xem TTL còn lại
-dig +ttlunits google.com A
-
-# Reverse DNS (IP → domain)
-dig -x 142.250.185.46
-
-# Trace toàn bộ hành trình DNS
+# Xem toàn bộ quá trình resolution từng bước
 dig +trace google.com
+# Hiện cả: Root → TLD → Authoritative → kết quả cuối
 
-# Kiểm tra DNS propagation (so sánh nhiều resolver)
-dig @1.1.1.1 api.myapp.com A   # Cloudflare
-dig @8.8.8.8 api.myapp.com A   # Google
-dig @9.9.9.9 api.myapp.com A   # Quad9
-```
+# Xem DNS đang được cấu hình trên máy
+cat /etc/resolv.conf
+# nameserver 8.8.8.8    ← DNS server máy bạn đang dùng
 
-```bash
-# Flush DNS cache local (Windows)
-ipconfig /flushdns
-
-# Flush DNS cache (Linux systemd)
+# Flush DNS cache (Linux với systemd-resolved)
 sudo systemd-resolve --flush-caches
 
-# Xem /etc/hosts (override DNS)
+# Kiểm tra /etc/hosts (file override DNS, check trước khi query DNS)
 cat /etc/hosts
 ```
 
----
+**Các loại DNS record quan trọng:**
+
+| Record | Dùng để |
+|--------|---------|
+| `A` | Map domain → IPv4 |
+| `AAAA` | Map domain → IPv6 |
+| `CNAME` | Alias domain → domain khác |
+| `MX` | Mail server của domain |
+| `TXT` | Text data (SPF, DKIM, xác minh domain) |
+| `NS` | Name server của domain |
 
 ## ⚠️ Lưu ý
 
-**1. TTL ảnh hưởng trực tiếp đến tốc độ rollback**
-- TTL cao (3600s) = cache lâu = khó rollback nhanh
-- TTL thấp (60s) = nhiều query hơn, nhưng thay đổi nhanh
-- Best practice: TTL 300s bình thường, hạ xuống 60s trước khi migrate
+1. **`/etc/hosts` được check trước DNS**: Nếu bạn thêm `127.0.0.1 google.com` vào `/etc/hosts`, mọi DNS query cho google.com sẽ ra `127.0.0.1`. Hay dùng để test local.
 
-**2. `/etc/hosts` luôn thắng DNS**
-```bash
-# Dev thường dùng để mock domain local
-127.0.0.1  api.myapp.local
-127.0.0.1  db.myapp.local
-```
+2. **DNS dùng UDP port 53** (cho query nhỏ) và **TCP port 53** (cho response lớn hoặc zone transfer). Firewall block port 53 = DNS chết.
 
-**3. DNS không mã hóa (trừ DoH/DoT)**
-- DNS thường → plaintext, bị ISP/attacker nhìn thấy
-- DNS over HTTPS (DoH) / DNS over TLS (DoT) → mã hóa
-- Cloudflare `1.1.1.1` hỗ trợ DoH/DoT
+3. **Negative caching**: DNS cũng cache kết quả "không tìm thấy" (NXDOMAIN). Nếu bạn tạo record mới mà vẫn bị NXDOMAIN → có thể phải chờ negative TTL expire.
 
-**4. DNS poisoning**
-- Attacker inject record giả vào cache của resolver
-- Phòng chống: DNSSEC (ký số các record)
-
-**5. Propagation không phải lúc nào cũng 48h**
-- Phụ thuộc vào TTL cũ, không phải con số cố định
-- Sau khi TTL cũ hết, record mới được fetch ngay
-
----
+4. **DNS trong Docker/K8s**: Có DNS server riêng (CoreDNS). Service discovery dùng pattern `service-name.namespace.svc.cluster.local`.
 
 ## 🔥 Bài tập
 
-**Bài 1 — Trace một domain:**
-```bash
-dig +trace github.com
-```
-Giải thích từng dòng output: Root NS nào được hỏi? TLD NS là gì? Authoritative NS là gì?
+1. Chạy `dig +trace google.com` và theo dõi từng bước — Root Server → TLD → Authoritative. Note lại TTL ở mỗi bước.
 
-**Bài 2 — So sánh propagation:**
-```bash
-# Chọn 1 domain bất kỳ, query từ 3 resolver khác nhau
-dig @1.1.1.1 stackoverflow.com A
-dig @8.8.8.8 stackoverflow.com A
-dig @208.67.222.222 stackoverflow.com A  # OpenDNS
-# IP có giống nhau không? TTL có khác nhau không? Tại sao?
-```
+2. Chạy `dig google.com` 2 lần liên tiếp. Quan sát TTL thay đổi giữa 2 lần → giải thích tại sao.
 
-**Bài 3 — Mock domain local:**
-Thêm vào `/etc/hosts`:
-```
-127.0.0.1  myapi.local
-```
-Sau đó chạy một HTTP server đơn giản và truy cập `http://myapi.local`. Giải thích tại sao nó hoạt động mà không cần DNS server.
+3. Thêm dòng `127.0.0.1 testsite.local` vào `/etc/hosts`, rồi `ping testsite.local`. Chuyện gì xảy ra? Xóa dòng đó đi sau khi test.
 
-**Bài 4 — Tư duy hệ thống:**
-> Công ty bạn có domain `api.prod.com` với TTL = 3600s, đang trỏ về server A. Lúc 9:00 AM server A chết, bạn cần failover sang server B. Mất bao lâu tối đa để tất cả user thấy IP mới? Làm gì để giảm downtime lần sau?
-
----
-
-**Tóm tắt 1 dòng:** DNS = danh bạ internet, hiểu TTL + record types là đủ để làm việc hàng ngày hiệu quả.
+4. **Tình huống**: App báo `getaddrinfo: Name or service not known` khi kết nối DB. Bạn sẽ debug bằng những lệnh nào, theo thứ tự nào?

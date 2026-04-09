@@ -1,43 +1,53 @@
-## Quiz: TCP vs UDP
+# 📝 Quiz: TCP vs UDP
+
+## Câu 1 (trắc nghiệm)
+
+Tại sao DNS thường dùng UDP thay vì TCP?
+
+a) UDP an toàn hơn TCP cho việc truyền domain name
+b) DNS query và response rất nhỏ, UDP nhanh hơn và đủ dùng — client tự retry nếu mất
+c) TCP không hỗ trợ truyền domain name
+d) UDP đảm bảo thứ tự tốt hơn TCP cho DNS
+
+**Đáp án: b)**
+
+**Giải thích:**
+- DNS query thường chỉ vài chục byte. Overhead của TCP (3-way handshake, ACK) cho một packet nhỏ như vậy là không cần thiết.
+- UDP gửi ngay, nhanh hơn. Nếu mất → client chờ timeout rồi gửi lại, vẫn nhanh hơn setup TCP connection.
+- a) Sai — UDP không an toàn hơn TCP, thực ra UDP không có built-in security nào cả.
+- c) Sai — TCP hoàn toàn có thể dùng cho DNS (DNS over TCP), thực tế DNS dùng TCP khi response quá lớn.
+- d) Sai — UDP không đảm bảo thứ tự. TCP mới đảm bảo thứ tự.
 
 ---
 
-### Câu 1 — Trắc nghiệm
+## Câu 2 (trắc nghiệm)
 
-**TCP khác UDP ở điểm nào sau đây?**
+App của bạn connect đến database và nhận lỗi "Connection timed out" thay vì "Connection refused". Điều gì nhiều khả năng đã xảy ra?
 
-A. TCP nhanh hơn UDP trong mọi trường hợp
-B. TCP đảm bảo dữ liệu đến đúng thứ tự và không bị mất
-C. UDP yêu cầu bắt tay 3 bước (3-way handshake) trước khi truyền
-D. UDP có cơ chế kiểm soát lỗi mạnh hơn TCP
+a) Process database đã chết và không còn listen ở port đó
+b) Database đang quá tải và từ chối kết nối mới
+c) Firewall đang drop packet mà không gửi lỗi về, hoặc server không reach được
+d) Sai username/password khi kết nối
 
-**Đáp án: B**
-> TCP có cơ chế xác nhận (ACK), đánh số thứ tự gói tin và truyền lại nếu mất. UDP thì không — gói tin có thể mất hoặc đến lộn xộn mà không được xử lý.
+**Đáp án: c)**
 
----
-
-### Câu 2 — Trắc nghiệm
-
-**Ứng dụng nào sau đây phù hợp nhất với UDP?**
-
-A. Giao dịch ngân hàng trực tuyến
-B. Tải file qua FTP
-C. Gọi video trực tuyến (VoIP/Zoom)
-D. Đăng nhập SSH
-
-**Đáp án: C**
-> Gọi video ưu tiên tốc độ thời gian thực hơn độ chính xác — mất vài gói tin chỉ gây giật nhẹ, còn trễ cao sẽ làm cuộc gọi không dùng được. UDP phù hợp vì overhead thấp, không cần thiết lập kết nối.
+**Giải thích:**
+- "Connection timed out": packet gửi đi nhưng không có reply gì cả — như thả đá xuống giếng không nghe tiếng. Thường do firewall drop silently, hoặc route đến server bị đứt.
+- "Connection refused": server nhận được packet nhưng không có gì listen ở port đó → gửi RST ngay.
+- a) Sai — nếu process chết thì OS sẽ gửi RST ngay lập tức → "Connection refused", không phải timeout.
+- b) Sai — quá tải thường trả về lỗi ở tầng ứng dụng, không phải TCP timeout.
+- d) Sai — sai password xảy ra sau khi TCP đã kết nối thành công.
 
 ---
 
-### Câu 3 — Tự luận ngắn
+## Câu 3 (tự luận)
 
-**Tại sao DNS thường dùng UDP thay vì TCP? Nêu ít nhất 2 lý do.**
+Giải thích bằng lời: TIME_WAIT trong TCP là gì? Tại sao nó tồn tại? Và khi nào bạn gặp vấn đề vì nó?
 
 **Đáp án gợi ý:**
 
-1. **Truy vấn nhỏ và nhanh** — Gói tin DNS thường chỉ vài chục byte, một gói UDP là đủ, không cần overhead của việc thiết lập kết nối TCP (3-way handshake).
-2. **Hiệu suất cao hơn** — Không cần duy trì trạng thái kết nối, server DNS có thể xử lý hàng triệu truy vấn đồng thời với tài nguyên ít hơn.
-3. *(Bonus)* Nếu gói tin bị mất, ứng dụng client tự retry — cơ chế đủ đơn giản để không cần TCP lo.
+Sau khi đóng một TCP connection, socket không biến mất ngay mà ở trạng thái TIME_WAIT trong khoảng 2 phút (2 × MSL — Maximum Segment Lifetime).
 
-> **Lưu ý:** DNS vẫn dùng TCP khi dữ liệu phản hồi lớn hơn 512 bytes (ví dụ: zone transfer).
+Tại sao cần TIME_WAIT: Đảm bảo mọi packet "lạc đường" của connection cũ đã hết hiệu lực trước khi port đó được dùng lại. Tránh trường hợp packet cũ bị nhầm vào connection mới.
+
+Vấn đề gặp phải: Khi server xử lý nhiều connection ngắn (ví dụ HTTP request nhiều), có thể có hàng nghìn socket ở TIME_WAIT → hết port → không tạo được connection mới → "Cannot assign requested address". Fix: `net.ipv4.tcp_tw_reuse = 1` hoặc cấu hình `SO_REUSEADDR` trong code.

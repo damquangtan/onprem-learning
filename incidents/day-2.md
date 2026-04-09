@@ -1,122 +1,97 @@
-# 🚨 Incident: Game Server bị lag đột ngột sau khi "optimize" networking
+# 🚨 Incident: Game server lag đột ngột sau khi "optimize" networking
 
 ## Mô tả
 
-Một game mobile multiplayer (battle royale) hoạt động bình thường. Dev backend quyết định "tối ưu" bằng cách chuyển game state sync từ **UDP sang TCP** để "đảm bảo dữ liệu không mất". 30 phút sau deploy, toàn bộ player báo lag, giật, delay 2-3 giây.
-
----
+Team dev của một game mobile realtime quyết định "tối ưu" networking bằng cách chuyển từ UDP sang TCP cho việc gửi vị trí nhân vật (position updates) — với lý do "TCP đáng tin cậy hơn". Sau khi deploy lên production, hàng nghìn user báo game lag nặng, giật, không chơi được.
 
 ## Triệu chứng
 
-- Player movement delay tăng từ ~50ms lên **2000-3000ms**
-- Server CPU bình thường (15%), RAM bình thường
-- Bandwidth bình thường
-- Log không có error
-- Chỉ xảy ra khi **>50 players** cùng phòng
-- Mobile 4G bị nặng hơn WiFi
+- Ping từ client đến server vẫn thấp (~20ms)
+- Nhưng nhân vật trong game di chuyển giật, đứng hình cách nhau 200-500ms
+- CPU và RAM server bình thường
+- Số lượng TCP connections tăng vọt lên ~50,000 connections đồng thời
+- Server bắt đầu báo `Too many open files` sau 30 phút
 
----
+## Nguyên nhân gốc rễ
 
-## Nguyên nhân
+**Đổi từ UDP sang TCP cho position updates là sai về mặt kiến trúc.**
 
-**TCP Head-of-Line Blocking** kết hợp với **congestion control** không phù hợp với game realtime.
+Position update gửi 30 lần/giây từ mỗi client. Với TCP:
+1. **Head-of-line blocking**: Nếu 1 packet bị mất → TCP block toàn bộ stream, chờ retry. Trong lúc đó vị trí nhân vật đứng hình.
+2. **Dữ liệu stale**: Khi TCP retry thành công và gửi vị trí cũ → game nhận vị trí của 200ms trước → hiển thị sai.
+3. **Connection overhead**: 10,000 players × 1 TCP connection mỗi player = 10,000 connections × resources (socket buffer, memory).
 
-```
-Game gửi position update 20 lần/giây = mỗi 50ms 1 packet
+Với UDP trước đây: mất 1 packet → bỏ qua (vị trí cũ vài ms không quan trọng) → tiếp tục với packet mới nhất.
 
-Scenario với TCP:
-  t=0ms   : Gửi packet #1 (position: x=100)
-  t=50ms  : Gửi packet #2 (position: x=110)  <-- packet #1 bị drop trên mạng 4G
-  t=100ms : Gửi packet #3 (position: x=120)
-  
-  TCP behavior:
-    - Phát hiện packet #1 mất → trigger retransmit
-    - Packet #2 và #3 đã tới server nhưng PHẢI CHỜ packet #1
-    - TCP Nagle's Algorithm gộp các packet nhỏ lại → thêm delay
-    - Retransmit timeout (RTO) mặc định: 200ms - 1000ms
-    
-  Kết quả: Player nhìn thấy position x=120 nhưng phải đợi 500ms+
-           Trong khi với UDP: drop packet #1, nhảy thẳng đến x=120 → mượt
-```
+## Cách debug từng bước
 
-**50 players × 20 packets/s = 1000 TCP connections** cùng lúc làm congestion window của server bị thrashing.
-
----
-
-## Cách debug
-
-**1. Đo RTT thực tế vs perceived latency:**
+**Bước 1: Xác nhận latency tầng network vẫn ổn**
 ```bash
-# Trên server, capture traffic
-tcpdump -i eth0 -w game_traffic.pcap port 7777
-
-# Mở trong Wireshark, filter:
-tcp.analysis.retransmission
-tcp.analysis.out_of_order
-
-# Thấy ngay: hàng nghìn retransmission trong 1 phút
+ping game-server.example.com -c 20
+# → 0% packet loss, avg 20ms
+# → Network không phải vấn đề. Vấn đề ở tầng ứng dụng
 ```
 
-**2. Check TCP socket buffer:**
+**Bước 2: Kiểm tra số lượng TCP connections**
 ```bash
-ss -tnp | grep 7777
-# Thấy Recv-Q tăng cao → buffer đầy, packets đang xếp hàng chờ
+ss -tn | grep :7777 | wc -l
+# ss -tn : hiện tất cả TCP connections (số thay hostname)
+# grep :7777 : lọc port game server
+# wc -l : đếm số dòng = số connections
+# → Kết quả: 47,832 connections
 ```
 
-**3. So sánh timestamp:**
-```python
-# Log phía client
-send_time = time.time()       # t=0ms, gửi packet position
-recv_ack_time = time.time()   # t=850ms, server ACK
-
-# Log phía server  
-recv_time = time.time()       # t=840ms, nhận được
-# → 840ms delay cho 1 position update = unplayable
-```
-
-**4. Reproduce có kiểm soát:**
+**Bước 3: Xem trạng thái connections**
 ```bash
-# Giả lập mạng 4G kém (1% packet loss)
-tc qdisc add dev eth0 root netem loss 1%
-
-# TCP với 1% loss → latency tăng ~10x do retransmit
-# UDP với 1% loss → mất 1% frame, game vẫn smooth
+ss -tn | grep :7777 | awk '{print $1}' | sort | uniq -c
+# → 45000 ESTAB (established — đang kết nối)
+# → 2000 TIME_WAIT (đang đóng — TCP giữ lại 2 phút)
+# Quá nhiều TIME_WAIT là dấu hiệu connection được tạo và đóng liên tục
 ```
 
----
+**Bước 4: Kiểm tra file descriptor limit**
+```bash
+cat /proc/$(pgrep game-server)/limits | grep "open files"
+# → Max open files: 65536
+# Mỗi TCP connection = 1 file descriptor
+# 50,000 connections gần đến giới hạn → "Too many open files"
+```
+
+**Bước 5: Xem memory usage của buffer TCP**
+```bash
+cat /proc/net/sockstat
+# → TCP: inuse 47832 ... mem 98304
+# → Mỗi TCP socket có send buffer và receive buffer (mặc định ~4-8KB mỗi loại)
+# → 47,832 sockets × 16KB = ~750MB chỉ cho socket buffers
+```
 
 ## Cách fix
 
-**Fix ngay (rollback):** Chuyển lại UDP cho game state sync.
-
-**Fix đúng (long term):** Dùng đúng protocol cho đúng mục đích:
-
-```
-UDP  → position, rotation, animation state (tolerates loss, latency-sensitive)
-TCP  → chat, inventory changes, kill events (must not lose, latency-tolerant)
-```
-
-```python
-# Thiết kế lại: Reliable UDP thay vì TCP
-class GameTransport:
-    def send_position(self, player_id, x, y, z):
-        # UDP: fire and forget, server dùng snapshot mới nhất
-        self.udp_socket.sendto(
-            pack_position(player_id, x, y, z, seq=self.seq_num),
-            self.server_addr
-        )
-        # KHÔNG cần ACK, KHÔNG cần retransmit
-        # Server nhận seq=105 → tự bỏ seq=103,104 nếu chưa tới
-
-    def send_item_pickup(self, item_id):
-        # TCP: bắt buộc đảm bảo, chấp nhận delay
-        self.tcp_socket.send(pack_item_event(item_id))
+**Fix ngay — rollback về UDP:**
+```bash
+# Rollback deployment về version cũ (dùng UDP)
+kubectl rollout undo deployment/game-server
+# Hoặc với systemd:
+systemctl stop game-server
+# Deploy binary cũ
+systemctl start game-server
 ```
 
-**Nếu muốn "reliable" mà vẫn dùng UDP → implement application-layer ACK:**
-- Chỉ retransmit với **critical events** (damage, death)
-- **Không bao giờ** retransmit positional data → dùng cái mới nhất
+**Fix đúng — kiến trúc phù hợp:**
+- Giữ UDP cho position updates (data realtime, stale data có thể bỏ)
+- Dùng TCP cho những gì cần reliability: chat, purchase, match result
 
----
+```
+# Verify sau khi rollback
+ss -tn | grep :7777 | wc -l
+# → Số connections giảm đáng kể
+# → Game không còn lag
+```
 
-**Bài học:** TCP "đảm bảo không mất data" là con dao hai lưỡi — nó đảm bảo thứ tự và delivery bằng cách **chặn** toàn bộ stream lại để chờ. Với game realtime, data cũ bị delay còn tệ hơn data bị mất.
+## Bài học
+
+1. **Chọn đúng giao thức cho đúng use case**. TCP "đáng tin cậy hơn" không có nghĩa là tốt hơn cho mọi trường hợp. Realtime data (vị trí, trạng thái) thường cần UDP.
+
+2. **Head-of-line blocking của TCP**: Khi 1 packet bị delay → toàn bộ stream phải chờ. Với realtime game, đây là killer feature (theo nghĩa xấu).
+
+3. **Load test trước khi deploy**: 10,000 TCP connections × resource overhead = vấn đề rõ ràng nếu có load test trước.

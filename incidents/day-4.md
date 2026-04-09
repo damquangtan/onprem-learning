@@ -1,106 +1,96 @@
-Bạn chưa cấp quyền ghi file. Đây là nội dung incident — bạn có thể tự lưu hoặc cho phép tôi ghi:
-
----
-
-# 🚨 Incident: Mixed Content / HTTP vs HTTPS
+# 🚨 Incident: Certificate hết hạn lúc 3 giờ sáng — toàn bộ API down
 
 ## Mô tả
 
-Sau khi migrate toàn bộ hệ thống lên HTTPS, một số API call từ frontend bị block hoàn toàn trên trình duyệt. Tính năng upload ảnh và thanh toán không hoạt động. Phát hiện lúc 14:30, ảnh hưởng ~30% user đang dùng Chrome/Firefox phiên bản mới.
-
----
+Lúc 3:15 sáng, toàn bộ mobile app của công ty ngừng hoạt động. User không thể login, không thể dùng bất kỳ tính năng nào. Monitoring báo 100% API calls fail với lỗi SSL. On-call engineer nhận alert lúc 3:20.
 
 ## Triệu chứng
 
-- Browser console hiển thị lỗi:
-  ```
-  Mixed Content: The page at 'https://app.example.com' was loaded over HTTPS,
-  but requested an insecure resource 'http://api.example.com/upload'.
-  This request has been blocked; the content must be served over HTTPS.
-  ```
-- API call trả về `net::ERR_BLOCKED_BY_CLIENT`, không có response
-- Safari vẫn hoạt động bình thường (policy khác nhau giữa các browser)
-- Postman test trực tiếp `http://api.example.com` vẫn OK → dev không phát hiện sớm
+- App mobile báo: "The certificate for this server is invalid"
+- Browser: `NET::ERR_CERT_DATE_INVALID`
+- `curl https://api.company.com/health` báo: `curl: (60) SSL certificate problem: certificate has expired`
+- HTTP (không HTTPS) vẫn hoạt động nhưng app không có fallback HTTP
+- 100% user không dùng được app
 
----
+## Nguyên nhân gốc rễ
 
-## Nguyên nhân
+SSL/TLS certificate của `api.company.com` hết hạn đúng lúc 3:00 AM. Certificate được mua từ CA 1 năm trước, không có auto-renewal. Không ai setup cảnh báo về ngày hết hạn.
 
-Frontend deploy lên `https://app.example.com`, nhưng config production vẫn hardcode endpoint cũ:
+## Cách debug từng bước
 
-```js
-// config/production.js  ← thủ phạm
-const API_BASE_URL = "http://api.example.com";  // ← thiếu S
-```
-
-Browser thực thi **Mixed Content Policy**: trang HTTPS không được phép gọi resource HTTP. Active mixed content (XHR/fetch) bị block hoàn toàn.
-
-Lý do bị bỏ sót:
-- Dev test bằng Postman — không có Mixed Content policy
-- Staging chạy HTTP → HTTP, không trigger lỗi
-- Không có E2E test trên browser thật với HTTPS
-
----
-
-## Cách debug
-
-**Bước 1** — `F12 → Console` → tìm `Mixed Content` hoặc `ERR_BLOCKED`
-
-**Bước 2** — `F12 → Network` → lọc `Blocked/Failed` → xem Request URL có `http://` không
-
-**Bước 3** — Scan bundle đã build:
+**Bước 1: Xác nhận vấn đề là certificate**
 ```bash
-grep -r "http://api" ./dist/
+curl -v https://api.company.com/health 2>&1 | grep -A5 "SSL"
+# -v : verbose, hiện chi tiết SSL handshake
+# → SSL certificate problem: certificate has expired
+# Xác nhận ngay: vấn đề là certificate, không phải server down hay DNS
 ```
 
-**Bước 4** — Kiểm tra CSP header:
+**Bước 2: Xem thông tin certificate chi tiết**
 ```bash
-curl -I https://app.example.com
-# Tìm: Content-Security-Policy: upgrade-insecure-requests
+echo | openssl s_client -connect api.company.com:443 2>/dev/null | openssl x509 -noout -dates -subject
+# openssl s_client -connect : kết nối SSL đến host:port
+# openssl x509 -noout -dates : đọc certificate và hiện ngày hết hạn
+# -subject : hiện certificate được cấp cho domain nào
+
+# Output:
+# subject=CN = api.company.com
+# notBefore=Jan 15 00:00:00 2023 GMT
+# notAfter=Jan 15 00:00:00 2024 GMT   ← đã hết hạn
 ```
 
-**Bước 5** — Kiểm tra Nginx có forward `X-Forwarded-Proto` đúng không:
+**Bước 3: Verify certificate hiện tại trên server**
 ```bash
-grep -r "proxy_set_header X-Forwarded-Proto" /etc/nginx/
-```
+ssh ubuntu@api-server
+ls -la /etc/nginx/ssl/
+# → api.company.com.crt (thấy file, nhưng nội dung đã expire)
 
----
+# Xem ngày hết hạn của cert file trực tiếp
+openssl x509 -in /etc/nginx/ssl/api.company.com.crt -noout -enddate
+# → notAfter=Jan 15 00:00:00 2024 GMT  ← hết hạn
+```
 
 ## Cách fix
 
-**Hotfix ngay:**
-```js
-const API_BASE_URL = "https://api.example.com";  // thêm S, redeploy
+**Fix ngay (trong đêm):**
+```bash
+# Cài certbot nếu chưa có
+sudo apt install certbot python3-certbot-nginx
+
+# Lấy certificate mới từ Let's Encrypt (miễn phí)
+sudo certbot --nginx -d api.company.com
+# certbot tự verify domain, lấy cert mới, cấu hình nginx, reload nginx
+
+# Verify cert mới
+echo | openssl s_client -connect api.company.com:443 2>/dev/null | openssl x509 -noout -dates
+# → notAfter=Apr 15 00:00:00 2024 GMT  ← 90 ngày từ hôm nay
+
+# Test HTTPS
+curl https://api.company.com/health
+# → {"status":"ok"}  ✓
 ```
 
-**Fix dài hạn:**
+**Fix lâu dài — tránh tái phát:**
+```bash
+# Setup auto-renewal với certbot (Let's Encrypt cert hết hạn sau 90 ngày, cần renew mỗi 60 ngày)
+sudo crontab -e
+# Thêm dòng này:
+# 0 3 * * * certbot renew --quiet && systemctl reload nginx
+# → Chạy lúc 3AM mỗi ngày, renew nếu cert sắp hết hạn (trong 30 ngày)
 
-1. Dùng env variable thay vì hardcode:
-   ```js
-   const API_BASE_URL = process.env.VITE_API_URL;
-   ```
+# Setup monitoring cảnh báo trước 30 ngày hết hạn
+# Prometheus blackbox exporter hoặc script cron:
+echo | openssl s_client -connect api.company.com:443 2>/dev/null \
+  | openssl x509 -noout -checkend 2592000  # 30 ngày = 2592000 giây
+# → exit code 1 nếu cert hết hạn trong 30 ngày → trigger alert
+```
 
-2. Thêm CSP header ở Nginx:
-   ```nginx
-   add_header Content-Security-Policy "upgrade-insecure-requests";
-   ```
+## Bài học
 
-3. Redirect HTTP → HTTPS ở API server:
-   ```nginx
-   server {
-       listen 80;
-       server_name api.example.com;
-       return 301 https://$host$request_uri;
-   }
-   ```
+1. **Certificate hết hạn là sự cố hoàn toàn tránh được**. Setup auto-renewal ngay từ đầu, đừng quản lý manually.
 
-4. Thêm bước scan vào CI/CD pipeline:
-   ```bash
-   grep -r "http://" ./dist/ && echo "ERROR: HTTP endpoint in build" && exit 1
-   ```
+2. **Let's Encrypt + certbot** là lựa chọn miễn phí, phổ biến, hỗ trợ auto-renewal tốt.
 
-5. E2E test chạy trên browser thật với staging HTTPS.
+3. **Monitor ngày hết hạn certificate** — alert ít nhất 30 ngày trước. Nhiều monitoring tool (Datadog, Prometheus, UptimeRobot) có tính năng này.
 
----
-
-> **Lesson learned:** Postman và curl không có Mixed Content Policy. Luôn test trên browser thật với đúng scheme HTTPS trước khi release. Dev environment HTTP → HTTP che giấu lỗi chỉ xuất hiện trên production HTTPS.
+4. **Test HTTPS sau mỗi lần renew**: `curl -v https://domain.com` để xác nhận cert mới hoạt động.

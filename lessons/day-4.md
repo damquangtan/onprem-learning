@@ -2,177 +2,164 @@
 
 ## 📖 Giải thích
 
-**HTTP (HyperText Transfer Protocol)** — giao thức truyền dữ liệu giữa client và server. Dữ liệu truyền đi **dạng plaintext**, ai cũng đọc được nếu bắt được packet.
+Hãy tưởng tượng bạn gửi thư tay cho ngân hàng, trong đó có số tài khoản và mật khẩu. Có 2 cách:
 
-**HTTPS = HTTP + TLS (Transport Layer Security)** — dữ liệu được **mã hóa** trước khi truyền. Ai bắt được packet cũng chỉ thấy rác.
+**HTTP — Gửi thư thường (không phong bì):** Ai cũng có thể đọc trên đường đi — người đưa thư, người ngồi cạnh xe, ai cũng thấy.
 
-### Cách hoạt động của TLS Handshake (đơn giản hóa):
+**HTTPS — Gửi thư trong hộp có khóa:** Chỉ bạn và ngân hàng có chìa khóa. Người khác bắt được hộp cũng không đọc được nội dung.
+
+**HTTP (HyperText Transfer Protocol)** là giao thức truyền dữ liệu giữa browser và web server. **HTTPS** = HTTP + **TLS** (Transport Layer Security) — lớp mã hóa bảo vệ dữ liệu.
+
+### HTTP hoạt động như thế nào?
 
 ```
-Client                          Server
-  |                               |
-  |--- ClientHello -------------->|  (Tôi hỗ trợ TLS 1.3, cipher suites này)
-  |<-- ServerHello + Certificate -|  (Dùng TLS 1.3, đây là cert của tôi)
-  |--- Verify cert + Key Exchange>|  (Cert hợp lệ, trao đổi session key)
-  |<-- Finished ------------------|  (OK, bắt đầu mã hóa)
-  |=== Encrypted Data ============|
+Browser                         Web Server
+  |                                  |
+  |  GET /index.html HTTP/1.1        |
+  |  Host: example.com               |
+  |  ─────────────────────────────>  |
+  |                                  |
+  |  HTTP/1.1 200 OK                 |
+  |  Content-Type: text/html         |
+  |  <html>...</html>                |
+  |  <─────────────────────────────  |
 ```
 
-### So sánh nhanh:
+Toàn bộ nội dung này **gửi dưới dạng plaintext** — không mã hóa.
 
-| Tiêu chí | HTTP | HTTPS |
-|---|---|---|
-| Port mặc định | 80 | 443 |
-| Mã hóa | Không | Có (TLS) |
-| Certificate | Không cần | Cần (SSL cert) |
-| SEO Google | Bị penalize | Ưu tiên |
-| Tốc độ | Nhỉnh hơn chút | Gần như tương đương (HTTP/2) |
+### HTTPS thêm TLS Handshake
 
----
+Trước khi gửi/nhận bất cứ gì, browser và server phải "thỏa thuận" cách mã hóa:
+
+```
+Browser                         Server
+  |                                  |
+  |  "Tôi hỗ trợ TLS 1.3,           |
+  |   dùng cipher suite nào?"        |
+  |  ─────────────────────────────>  |
+  |                                  |
+  |  "Dùng AES-256. Đây là           |
+  |   Certificate của tôi"           |
+  |  <─────────────────────────────  |
+  |                                  |
+  |  [Verify Certificate]            |
+  |  "Certificate hợp lệ.            |
+  |   Đây là session key"            |
+  |  ─────────────────────────────>  |
+  |                                  |
+  |  [Kết nối đã mã hóa]             |
+  |  GET /index.html ...             |
+  |  ═════════════════════════════>  |
+```
+
+### Certificate là gì?
+
+Certificate (chứng chỉ SSL/TLS) giống như CMND của website:
+- Chứng minh website này thực sự là `google.com`, không phải ai giả mạo
+- Được cấp bởi **CA (Certificate Authority)** — tổ chức uy tín mà browser tin tưởng (Let's Encrypt, DigiCert...)
+- Chứa **public key** dùng để thiết lập mã hóa
+
+## 🧠 Tại sao cần biết điều này?
+
+- Dùng HTTP thay HTTPS → dữ liệu user (password, token) bị lộ khi qua mạng công cộng
+- Certificate hết hạn → browser báo lỗi, user không vào được
+- Misconfigured HTTPS → app gửi mixed content (HTTP trong HTTPS) → browser block
+- Debug API calls cần hiểu HTTP headers, status code, request/response format
 
 ## 🧪 Ví dụ thực tế
 
-**Tình huống:** User login vào web app của bạn.
+**Tình huống 1:** API trả về `401 Unauthorized` dù bạn đã gửi token.
 
-**Với HTTP:**
-```
-POST /login HTTP/1.1
-Host: myapp.com
-
-username=admin&password=SuperSecret123
-```
-Kẻ tấn công dùng Wireshark trên cùng WiFi → đọc được password ngay.
-
-**Với HTTPS:**
-```
-# Packet bắt được chỉ thấy:
-TLSv1.3 Record Layer: Application Data Protocol: http-over-tls
-    Encrypted Application Data: a3f8c2d1e9b4... (rác)
-```
-
-**Tình huống thực tế hơn — dev hay gặp:**
+Kiểm tra bằng curl:
 ```bash
-# Gọi API không có HTTPS → browser chặn Mixed Content
-# Web bạn chạy HTTPS nhưng gọi:
-fetch("http://api.internal/data")  # ❌ Browser block ngay
+curl -v -H "Authorization: Bearer mytoken123" https://api.example.com/data
+# -v : verbose — hiện toàn bộ request và response headers
+```
+Output `< HTTP/1.1 401` + xem response body để hiểu lý do cụ thể.
 
-# Phải dùng:
-fetch("https://api.internal/data")  # ✅
+**Tình huống 2:** Browser báo `NET::ERR_CERT_DATE_INVALID`.
+
+→ Certificate hết hạn. Kiểm tra:
+```bash
+echo | openssl s_client -connect example.com:443 2>/dev/null | openssl x509 -noout -dates
+# notAfter=... ← ngày hết hạn
 ```
 
----
+**Tình huống 3:** App HTTP trong môi trường production bị chặn.
 
-## 💻 Command
+→ Nhiều browser hiện nay tự redirect HTTP → HTTPS. Server phải có HTTPS hoặc dùng redirect 301.
 
-**Kiểm tra certificate của một domain:**
+## 💻 Command (giải thích từng dòng)
+
 ```bash
-# Xem cert info
-curl -vI https://google.com 2>&1 | grep -E "SSL|subject|expire|issuer"
+# curl cơ bản — gửi GET request
+curl https://api.example.com/health
 
-# Kiểm tra ngày hết hạn cert
-echo | openssl s_client -connect google.com:443 2>/dev/null \
-  | openssl x509 -noout -dates
-```
+# -v : verbose — hiện cả request headers và response headers
+curl -v https://api.example.com/health
 
-**Test HTTP vs HTTPS response:**
-```bash
-# HTTP → thường redirect sang HTTPS
-curl -I http://github.com
-# HTTP/1.1 301 Moved Permanently
-# Location: https://github.com/
-
-# HTTPS → trả về 200
-curl -I https://github.com
+# -I : chỉ lấy headers, không lấy body (HTTP HEAD request)
+curl -I https://google.com
 # HTTP/2 200
+# content-type: text/html; charset=UTF-8
+# ...
+
+# -X POST : gửi POST request
+# -H : thêm header
+# -d : request body (data)
+curl -X POST https://api.example.com/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"secret"}'
+
+# -L : follow redirect (HTTP 301/302)
+curl -L http://google.com
+# HTTP/1.1 301 → redirect đến https://google.com
+# HTTP/2 200 → trang thật
+
+# Kiểm tra certificate của một domain
+openssl s_client -connect example.com:443
+# Hiện thông tin certificate, ngày hết hạn, CA
+
+# Xem ngày hết hạn certificate
+echo | openssl s_client -connect example.com:443 2>/dev/null | openssl x509 -noout -dates
+# notBefore=Jan 1 00:00:00 2024 GMT
+# notAfter=Jan 1 00:00:00 2025 GMT  ← hết hạn ngày này
 ```
 
-**Tạo self-signed cert cho local dev:**
-```bash
-# Dùng mkcert (recommended cho dev)
-brew install mkcert
-mkcert -install
-mkcert localhost 127.0.0.1
+**HTTP Status Code quan trọng:**
 
-# Output: localhost+1.pem và localhost+1-key.pem
-# Dùng trong Nginx/Node.js/etc.
-```
-
-**Config Nginx HTTPS cơ bản:**
-```nginx
-server {
-    listen 443 ssl;
-    server_name myapp.com;
-
-    ssl_certificate     /etc/ssl/certs/myapp.pem;
-    ssl_certificate_key /etc/ssl/private/myapp.key;
-    ssl_protocols       TLSv1.2 TLSv1.3;  # Bỏ TLS 1.0, 1.1 vì đã deprecated
-
-    location / {
-        proxy_pass http://localhost:3000;
-    }
-}
-
-# Redirect HTTP → HTTPS
-server {
-    listen 80;
-    return 301 https://$host$request_uri;
-}
-```
-
----
+| Code | Ý nghĩa | Gặp khi |
+|------|---------|---------|
+| `200` | OK | Thành công |
+| `201` | Created | POST tạo resource thành công |
+| `301/302` | Redirect | Domain đổi, HTTP → HTTPS |
+| `400` | Bad Request | Request sai format/thiếu field |
+| `401` | Unauthorized | Chưa auth hoặc token sai |
+| `403` | Forbidden | Đã auth nhưng không có quyền |
+| `404` | Not Found | URL không tồn tại |
+| `500` | Internal Server Error | Bug phía server |
+| `502` | Bad Gateway | Reverse proxy không reach được backend |
+| `503` | Service Unavailable | Server quá tải hoặc đang down |
 
 ## ⚠️ Lưu ý
 
-**1. HTTPS không có nghĩa là site an toàn tuyệt đối**
-> Chỉ đảm bảo dữ liệu *truyền đi* được mã hóa. Server vẫn có thể bị hack, code vẫn có thể có lỗ hổng.
+1. **HTTP/1.1 vs HTTP/2 vs HTTP/3**: HTTP/1.1 dùng một kết nối per request. HTTP/2 multiplexing — nhiều request qua 1 kết nối. HTTP/3 dùng QUIC (UDP-based). Khi debug, biết phiên bản HTTP đang dùng giúp hiểu performance.
 
-**2. Mixed Content là lỗi phổ biến**
-```
-# Symptom: HTTPS site nhưng browser báo "Not Secure"
-# Nguyên nhân: load resource qua HTTP
-<img src="http://cdn.example.com/logo.png">  # ❌
-<img src="https://cdn.example.com/logo.png"> # ✅
-```
+2. **Mixed content**: Nếu trang HTTPS load resource qua HTTP (ảnh, script) → browser block. Luôn dùng HTTPS cho mọi resource.
 
-**3. Cert hết hạn = downtime**
-```bash
-# Dùng Let's Encrypt + certbot để auto-renew
-certbot renew --dry-run  # test trước
-# Thêm vào crontab để chạy mỗi ngày
-0 0 * * * certbot renew --quiet
-```
+3. **Self-signed certificate**: Certificate tự ký không được tin tưởng bởi browser. OK cho internal/dev, không dùng production. `curl -k` để bỏ qua verify certificate (chỉ dùng khi debug).
 
-**4. TLS 1.0 và 1.1 đã bị deprecated (2020)**
-> Nếu server vẫn support → bị scanner báo lỗi bảo mật, browser cũng cảnh báo.
-
-**5. HTTP/2 chỉ chạy trên HTTPS**
-> Muốn tận dụng HTTP/2 (multiplexing, header compression, nhanh hơn) → bắt buộc phải HTTPS.
-
----
+4. **HSTS (HTTP Strict Transport Security)**: Header báo browser "chỉ dùng HTTPS cho domain này". Một khi set, browser từ chối HTTP hoàn toàn — kể cả khi server cho phép.
 
 ## 🔥 Bài tập
 
-**Bài 1 — Quan sát thực tế:**
-```bash
-# Dùng curl kiểm tra 3 site sau, xem response header khác nhau gì:
-curl -I http://example.com
-curl -I https://example.com
-curl -I http://facebook.com  # Xem redirect như thế nào
-```
+1. Chạy `curl -v https://google.com 2>&1 | head -50`. Đọc output và xác định:
+   - TLS version đang dùng là gì?
+   - HTTP version là gì?
+   - Status code là gì?
 
-**Bài 2 — Phân tích cert:**
-```bash
-# Kiểm tra cert của github.com
-# Trả lời: cert do ai cấp? Hết hạn ngày nào? Hỗ trợ TLS version nào?
-echo | openssl s_client -connect github.com:443 2>/dev/null | openssl x509 -noout -text | grep -E "Issuer|Not After|Version"
-```
+2. Chạy `curl -I http://google.com`. Thấy status code gì? Tại sao?
 
-**Bài 3 — Setup local HTTPS:**
-> Cài `mkcert`, tạo cert cho `localhost`, chạy một server Node.js/Nginx với HTTPS. Truy cập `https://localhost` không bị cảnh báo trên browser.
+3. Kiểm tra certificate của một website bất kỳ bằng `openssl s_client`. Xem ngày hết hạn.
 
-**Bài 4 — Tư duy:**
-> Tại sao các internal service trong Kubernetes cluster (pod-to-pod) thường dùng HTTP thay vì HTTPS? Khi nào thì cần bật mTLS cho internal traffic?
-
----
-
-> **Key takeaway:** HTTP = bưu thiếp (ai cũng đọc được). HTTPS = thư trong phong bì có khóa. Năm 2026, không có lý do gì để dùng HTTP cho production.
+4. **Tình huống**: API trả về `403 Forbidden` dù bạn đã đăng nhập thành công và có token. 3 nguyên nhân có thể là gì?

@@ -1,107 +1,91 @@
-# 🚨 Incident: Deployment mới lên production — một số user không vào được app
+# 🚨 Incident: Deploy mới xong — một số user không vào được app
 
 ## Mô tả
 
-Team vừa migrate service `api.company.com` từ server cũ (IP `203.0.113.10`) sang server mới (IP `203.0.113.99`). Đã update DNS record, tưởng xong. Nhưng 2 tiếng sau vẫn có ~30% user báo lỗi connection timeout.
-
----
+Team deploy version mới của `web-app`, bao gồm đổi domain từ `app.company.com` sang `www.company.com`. DNS record được update và đã verify bằng `dig` từ máy của engineer. Nhưng 2 giờ sau deploy, vẫn có user báo vào app bị lỗi "This site can't be reached" hoặc vào được nhưng thấy version cũ.
 
 ## Triệu chứng
 
-- User A (Hà Nội): vào app bình thường
-- User B (TP.HCM): `ERR_CONNECTION_TIMED_OUT`
-- Server mới chạy tốt, health check pass
-- `curl https://api.company.com` từ máy dev → OK
-- Monitoring thấy traffic vào server mới đúng, nhưng server cũ vẫn nhận ~30% request
+- Khoảng 30% user báo lỗi hoặc thấy nội dung cũ
+- Từ máy engineer: `dig www.company.com` → IP mới ✓
+- Từ máy user bị lỗi: `dig www.company.com` → IP cũ (server đã tắt)
+- Không có lỗi ở phía server mới
 
----
+## Nguyên nhân gốc rễ
 
-## Nguyên nhân
+DNS record cũ có **TTL = 86400 giây (24 giờ)**. Những user đã visit app trong 24 giờ trước khi deploy đang có DNS cache trỏ về IP cũ. IP cũ đã bị tắt → "This site can't be reached".
 
-**DNS TTL còn quá cao + DNS caching nhiều tầng.**
+Engineer verify từ máy mình thành công vì máy đó chưa từng query `www.company.com` nên không có cache cũ.
 
-Trước khi migrate, DNS record `api.company.com A 203.0.113.10` có TTL = **7200 giây (2 tiếng)**.
+## Cách debug từng bước
 
-Khi update record sang IP mới, các DNS resolver đã cache record cũ sẽ tiếp tục dùng IP cũ cho đến khi TTL hết hạn. Tùy vào thời điểm resolver của từng user cache lại:
-
-```
-User A resolver cache → đã expire → resolve IP mới ✅
-User B resolver cache → còn 90 phút TTL → vẫn trỏ IP cũ ❌
-```
-
-Server cũ đã bị tắt → user B timeout.
-
----
-
-## Cách debug
-
-**1. Kiểm tra record hiện tại đang resolve về đâu:**
+**Bước 1: Verify DNS record từ authoritative server (bỏ qua cache)**
 ```bash
-# Hỏi authoritative nameserver — luôn trả về record mới nhất
-dig @ns1.company.com api.company.com
-
-# Hỏi public resolver — có thể còn cache cũ
-dig @8.8.8.8 api.company.com
-dig @1.1.1.1 api.company.com
+dig @8.8.8.8 www.company.com
+# @8.8.8.8 : query thẳng đến Google DNS (bypass local cache)
+# → Kết quả: IP mới ✓
+# → DNS record đã cập nhật đúng trên authoritative server
 ```
 
-**2. Kiểm tra TTL còn lại của cache:**
+**Bước 2: Kiểm tra TTL còn lại**
 ```bash
-# Số giây còn lại trong cache của 8.8.8.8
-dig @8.8.8.8 api.company.com | grep -i ttl
+dig www.company.com
+# Xem dòng ANSWER SECTION:
+# www.company.com. 82340 IN A 1.2.3.4
+#                  ^^^^^
+#                  TTL còn lại: 82340 giây (~22 giờ nữa cache mới expire)
 ```
 
-**3. Xác nhận server cũ đã down:**
+**Bước 3: Query từ nhiều DNS resolver khác nhau để xác nhận**
 ```bash
-curl -v --resolve api.company.com:443:203.0.113.10 https://api.company.com
-# → Connection refused hoặc timeout = confirm root cause
+dig @1.1.1.1 www.company.com   # Cloudflare DNS
+dig @8.8.8.8 www.company.com   # Google DNS
+dig @208.67.222.222 www.company.com  # OpenDNS
+# Nếu tất cả đều trả về IP mới → vấn đề là client cache, không phải propagation
 ```
 
-**4. Theo dõi propagation toàn cầu:**
-```
-whatsmydns.net → check api.company.com từ nhiều location
+**Bước 4: Hướng dẫn user bị lỗi flush DNS cache**
+```bash
+# Linux (systemd-resolved)
+sudo systemd-resolve --flush-caches
+
+# macOS
+sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+
+# Windows
+ipconfig /flushdns
+
+# Sau khi flush, thử lại → vào được → xác nhận vấn đề là client DNS cache
 ```
 
----
+**Bước 5: Kiểm tra TTL ban đầu của record cũ**
+```bash
+# Xem lịch sử qua DNS history tool, hoặc hỏi team DNS admin
+# TTL cũ là 86400 (24 giờ) → user nào query trong 24h trước deploy đều bị cache cũ
+```
 
 ## Cách fix
 
-**Fix ngay (tạm thời):**
+**Tức thì (giảm thiểu tác động):**
+- Hướng dẫn user bị ảnh hưởng flush DNS cache (xem lệnh bước 4)
+- Nếu có thể: giữ server cũ sống thêm vài giờ hoặc setup redirect từ IP cũ sang IP mới
 
-Bật lại server cũ, forward traffic sang server mới để user không bị timeout trong lúc chờ TTL expire:
+**Lâu dài (quy trình chuẩn cho lần sau):**
 
-```nginx
-# Trên server cũ — proxy sang server mới
-location / {
-    proxy_pass http://203.0.113.99;
-}
+Trước khi migration DNS, luôn thực hiện "TTL lowering":
+```
+T-48h: Hạ TTL từ 86400 xuống 300 (5 phút)
+T-0h:  Chờ ít nhất 48 giờ (bằng TTL cũ) để cache cũ expire
+       Sau đó đổi IP → chỉ cần chờ tối đa 5 phút là tất cả user thấy IP mới
+T+1h:  Sau khi verify ổn, tăng TTL lại về 3600 hoặc 86400
 ```
 
-**Fix gốc rễ — rút kinh nghiệm cho lần sau:**
+## Bài học
 
-Hạ TTL **trước khi migrate** ít nhất bằng TTL hiện tại:
+1. **TTL cao = thay đổi lan chậm**. TTL 24 giờ nghĩa là một số user có thể thấy địa chỉ cũ đến 24 giờ sau khi bạn thay đổi.
 
-```
-# 48h trước migration
-api.company.com A 203.0.113.10 TTL=300   ← hạ xuống 5 phút
+2. **Luôn hạ TTL trước khi migration DNS** — ít nhất bằng thời gian TTL hiện tại để cache cũ expire.
 
-# Lúc migrate — chỉ cần chờ 5 phút là toàn bộ cache expire
-api.company.com A 203.0.113.99 TTL=300
+3. **Dùng `dig @8.8.8.8`** khi verify DNS — query thẳng đến authoritative, không bị ảnh hưởng bởi local cache của máy bạn.
 
-# Sau khi ổn định — tăng TTL lại
-api.company.com A 203.0.113.99 TTL=3600
-```
-
-**Checklist migration DNS chuẩn:**
-
-| Bước | Timing | Action |
-|------|--------|--------|
-| 1 | T-48h | Hạ TTL xuống 300s |
-| 2 | T-0 | Đổi IP, chờ `300s` |
-| 3 | T+5m | Verify bằng `dig` nhiều resolver |
-| 4 | T+1h | Tắt server cũ |
-| 5 | T+24h | Tăng TTL trở lại |
-
----
-
-**Bài học:** TTL không phải chỉ là metadata — nó quyết định bao lâu thế giới "quên" IP cũ của bạn. Migrate DNS mà không hạ TTL trước = đặt cược vào may mắn.
+4. **Không tắt server cũ ngay** sau khi đổi DNS. Giữ vài giờ để xử lý user còn cache cũ.

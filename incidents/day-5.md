@@ -1,91 +1,116 @@
-Đây là nội dung incident — bạn có thể tự lưu hoặc cho phép tôi ghi:
-
----
-
-# 🚨 Incident: SSH Permission Denied — Deploy Pipeline Sập Hoàn Toàn
+# 🚨 Incident: Không SSH được vào server sau khi "tăng bảo mật"
 
 ## Mô tả
 
-CI/CD pipeline bị sập lúc 09:15 sau khi team DevOps rotate SSH key trên toàn bộ production servers. Tất cả automated deployment từ GitLab CI đều fail với lỗi `Permission denied (publickey)`. Không có release nào có thể deploy được. Hotfix đang chờ không thể lên production.
-
----
+Junior engineer được giao task "tăng bảo mật SSH cho production server". Sau khi thực hiện một số thay đổi trong `/etc/ssh/sshd_config` và restart SSH service, toàn bộ team bị khóa ra ngoài — không ai SSH được vào server nữa. Server vẫn chạy (website vẫn online) nhưng không có cách nào vào quản lý.
 
 ## Triệu chứng
 
-- GitLab CI job log hiển thị:
-  ```
-  ssh: connect to host 10.10.1.50 port 22
-  Permission denied (publickey).
-  fatal: Could not read from remote repository.
-  ```
-- Dev SSH thủ công vào server bằng key cá nhân vẫn OK → chỉ CI bị ảnh hưởng
-- Tất cả môi trường (staging, prod) đều fail cùng lúc
-- `git pull` và `ansible-playbook` từ pipeline đều bị chặn
-- Monitoring vẫn xanh — server đang chạy bình thường, chỉ deploy không được
+- `ssh ubuntu@prod-server` → "Connection refused"
+- `ssh -p 2222 ubuntu@prod-server` → "Connection refused" (sau khi thử nhiều port)
+- `ping prod-server` → Thành công (server vẫn sống)
+- Website đang chạy trên server vẫn phục vụ user bình thường
+- Không có ai trong team còn session SSH nào đang mở
 
----
+## Nguyên nhân gốc rễ
 
-## Nguyên nhân
+Engineer thực hiện 2 thay đổi:
+1. Đổi SSH port từ 22 sang 2222 trong `sshd_config`
+2. Thêm rule firewall chặn tất cả inbound connections ngoài port 80 và 443
 
-Team DevOps rotate SSH key theo security policy định kỳ hàng quý. Họ đã:
+Vấn đề: **Firewall rule được thêm trước khi restart SSH với port mới**. Kết quả: SSH ở port 22 bị firewall chặn (đã thêm rule), SSH ở port 2222 cũng bị chặn (port mới chưa được mở trong firewall). Mọi đường vào đều bị block.
 
-1. Generate key pair mới cho CI/CD service account (`deploy_user`)
-2. Cập nhật `~/.ssh/authorized_keys` trên tất cả server với **public key mới**
-3. **Quên cập nhật private key tương ứng vào GitLab CI/CD Variables**
+## Cách debug từng bước
 
-GitLab CI vẫn đang dùng private key cũ (`$SSH_PRIVATE_KEY`) không còn match với public key trên server nữa.
-
-```
-Server authorized_keys:  ssh-rsa AAAA...NEW_KEY deploy_user   ← key mới
-GitLab CI variable:      ssh-rsa AAAA...OLD_KEY               ← key cũ ← MISMATCH
-```
-
----
-
-## Cách debug
-
-**Bước 1** — Đọc log CI, xác nhận `Permission denied (publickey)` — auth fail, không phải network/firewall.
-
-**Bước 2** — SSH thủ công từ local để xác nhận server còn sống:
+**Bước 1: Xác nhận server vẫn sống**
 ```bash
-ssh deploy_user@10.10.1.50
+ping prod-server -c 4
+# → 0% packet loss → Host sống, vấn đề không phải server down
 ```
 
-**Bước 3** — Vào GitLab → Settings → CI/CD → Variables → xem `$SSH_PRIVATE_KEY` được set lúc nào.
-
-**Bước 4** — Kiểm tra `authorized_keys` trên server, so sánh fingerprint:
+**Bước 2: Test SSH port**
 ```bash
-cat ~/.ssh/authorized_keys
-echo "$SSH_PRIVATE_KEY" | ssh-keygen -l -f -
+nc -zv prod-server 22
+# → Connection refused  hoặc  timeout
+
+nc -zv prod-server 2222
+# → Connection refused  hoặc  timeout
+
+# "Connection refused" = có gì chặn ở đây
+# "Timeout" = firewall drop packet không gửi RST về
 ```
 
-**Bước 5** — SSH verbose để thấy key nào đang được thử:
+**Bước 3: Scan xem port nào đang mở từ ngoài**
 ```bash
-ssh -vvv deploy_user@10.10.1.50 2>&1 | grep "Offering\|Authentications"
+nmap -p 1-65535 prod-server
+# → PORT    STATE  SERVICE
+# → 80/tcp  open   http
+# → 443/tcp open   https
+# → Không thấy port SSH nào → firewall chặn hết port trừ 80 và 443
 ```
 
----
+**Bước 4: Tìm phương án vào server không qua SSH**
+
+Đây là lúc cần **out-of-band access** — tức là cách vào server không qua network thông thường:
+- Cloud provider (AWS, GCP, Azure): dùng **EC2 Instance Connect**, **Serial Console**, hoặc **VNC** từ web console
+- VPS provider: thường có console access từ control panel
+- Bare metal: cần physical access hoặc IPMI/iDRAC
+
+```bash
+# Ví dụ với AWS EC2
+aws ec2-instance-connect send-ssh-public-key \
+  --instance-id i-1234567890abcdef0 \
+  --availability-zone us-east-1a \
+  --instance-os-user ubuntu \
+  --ssh-public-key file://~/.ssh/id_ed25519.pub
+```
+
+**Bước 5: Sau khi vào được bằng console, sửa firewall**
+```bash
+# Xem firewall rules hiện tại
+sudo iptables -L -n
+# hoặc nếu dùng ufw:
+sudo ufw status verbose
+
+# Mở port SSH (port mới 2222)
+sudo ufw allow 2222/tcp
+sudo ufw reload
+
+# Hoặc thêm rule iptables
+sudo iptables -I INPUT -p tcp --dport 2222 -j ACCEPT
+```
+
+**Bước 6: Verify SSH hoạt động trước khi logout console**
+```bash
+# Mở terminal khác, test SSH
+ssh -p 2222 ubuntu@prod-server
+# → Phải vào được trước khi đóng console session
+```
 
 ## Cách fix
 
-**Hotfix ngay (5 phút):** Cập nhật private key mới vào GitLab CI/CD Variable `$SSH_PRIVATE_KEY`, trigger pipeline manual để test.
+```bash
+# 1. Mở port SSH mới trong firewall
+sudo ufw allow 2222/tcp
 
-**Fix dài hạn:**
+# 2. Verify sshd đang listen đúng port
+ss -tlnp | grep sshd
+# → LISTEN 0 128 0.0.0.0:2222 ...
 
-1. Thêm smoke test SSH vào đầu pipeline:
-```yaml
-test_ssh_connection:
-  stage: pre-deploy
-  script:
-    - eval $(ssh-agent -s)
-    - echo "$SSH_PRIVATE_KEY" | ssh-add -
-    - ssh -o StrictHostKeyChecking=no deploy_user@$DEPLOY_HOST "echo SSH OK"
+# 3. Test từ máy khác trước khi đóng session hiện tại
+ssh -p 2222 ubuntu@prod-server  # (từ terminal khác)
+# → Vào được ✓
+
+# 4. Sau khi verify OK, có thể xóa rule cho port 22 cũ
+sudo ufw delete allow 22/tcp
 ```
 
-2. Cập nhật runbook rotate key — bắt buộc có bước kiểm tra CI/CD secrets sau khi rotate.
+## Bài học
 
-3. Xét dùng SSH certificate với TTL ngắn thay vì static key pair để giảm rủi ro mỗi lần rotate.
+1. **Không bao giờ thay đổi SSH config và đóng session mà không verify trước**. Luôn mở terminal thứ 2, test SSH với config mới trong khi vẫn giữ session cũ.
 
----
+2. **Thứ tự thay đổi firewall quan trọng**: Mở port mới trước → verify → mới đóng port cũ. Không bao giờ ngược lại.
 
-> **Lesson learned:** "Dev SSH được bình thường" ≠ CI/CD cũng OK. Chúng dùng credential khác nhau. Rotate credential phải đi kèm test ngay sau đó.
+3. **Biết out-of-band access** của provider bạn đang dùng trước khi cần. Khi bị lock out thì không có thời gian nghiên cứu.
+
+4. **Test từng thay đổi nhỏ**, không thay đổi nhiều thứ cùng lúc. Đổi port SSH một mình trước, verify xong rồi mới động đến firewall.

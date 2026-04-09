@@ -111,21 +111,27 @@ if [ -f "$LESSON_FILE" ]; then
   echo "⏭️  $LESSON_FILE đã tồn tại, bỏ qua."
 else
   claude -p "
-Bạn là Senior System Engineer.
+Bạn là Senior System Engineer đang dạy một junior dev chưa biết gì về chủ đề này.
 
 Dạy chủ đề: $TOPIC
 
 Yêu cầu:
 - Tiếng Việt
-- Ngắn gọn (5-10 phút đọc)
-- Có ví dụ thực tế dev dễ hiểu
+- Giải thích từ đầu, đừng giả định người đọc đã biết gì
+- Dùng ngôn ngữ đơn giản, tránh jargon — nếu phải dùng thì giải thích ngay
+- Dùng ví dụ so sánh với cuộc sống thực tế trước khi vào kỹ thuật
+- Giải thích TẠI SAO trước khi giải thích NHƯ THẾ NÀO
+- Mỗi khái niệm mới: giải thích kỹ, cho ví dụ, rồi mới sang khái niệm tiếp theo
+- Command phải có giải thích từng flag/option
+- Dài bao nhiêu cũng được, miễn là người mới hiểu được
 
-Format:
+Format (chỉ trả về markdown, không thêm lời giải thích bên ngoài):
 # 🧠 Chủ đề: $TOPIC
 
 ## 📖 Giải thích
+## 🧠 Tại sao cần biết điều này?
 ## 🧪 Ví dụ thực tế
-## 💻 Command
+## 💻 Command (giải thích từng dòng)
 ## ⚠️ Lưu ý
 ## 🔥 Bài tập
 " > $LESSON_FILE
@@ -137,14 +143,28 @@ if [ -f "$QUIZ_FILE" ]; then
   echo "⏭️  $QUIZ_FILE đã tồn tại, bỏ qua."
 else
   claude -p "
-Tạo 3 câu hỏi quiz về: $TOPIC
+Tạo 3 câu hỏi quiz về: $TOPIC dành cho người mới học.
 
-- 2 trắc nghiệm
-- 1 tự luận ngắn
+- 2 câu trắc nghiệm (4 lựa chọn, có giải thích tại sao đáp án đúng và tại sao các đáp án kia sai)
+- 1 câu tự luận (yêu cầu giải thích bằng lời, không phải viết code)
 
-Có đáp án
+Tiếng Việt.
+Chỉ trả về markdown, không thêm lời giải thích bên ngoài.
 
-Tiếng Việt
+Format:
+# 📝 Quiz: $TOPIC
+
+## Câu 1 (trắc nghiệm)
+...
+**Đáp án: ...**
+**Giải thích: ...**
+
+## Câu 2 (trắc nghiệm)
+...
+
+## Câu 3 (tự luận)
+...
+**Đáp án gợi ý: ...**
 " > $QUIZ_FILE
   echo "✅ $QUIZ_FILE"
 fi
@@ -156,14 +176,29 @@ else
   claude -p "
 Tạo 1 tình huống sự cố production liên quan: $TOPIC
 
+Viết cho người mới — giải thích rõ từng bước debug, tại sao làm vậy, lệnh nào dùng để kiểm tra cái gì.
+Chỉ trả về markdown, không thêm lời giải thích bên ngoài.
+
 Format:
-# 🚨 Incident
+# 🚨 Incident: [tên sự cố ngắn gọn]
 
 ## Mô tả
+(bối cảnh, hệ thống đang làm gì)
+
 ## Triệu chứng
-## Nguyên nhân
-## Cách debug
+(người dùng/monitor thấy gì)
+
+## Nguyên nhân gốc rễ
+(giải thích kỹ tại sao lại xảy ra)
+
+## Cách debug từng bước
+(mỗi bước: lệnh + giải thích lệnh đó kiểm tra cái gì + output mong đợi)
+
 ## Cách fix
+(lệnh fix + giải thích)
+
+## Bài học
+(rút ra điều gì để không tái phát)
 " > $INCIDENT_FILE
   echo "✅ $INCIDENT_FILE"
 fi

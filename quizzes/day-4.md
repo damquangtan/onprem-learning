@@ -1,39 +1,55 @@
-## Quiz: HTTP vs HTTPS
+# 📝 Quiz: HTTP vs HTTPS
+
+## Câu 1 (trắc nghiệm)
+
+API trả về status code `502 Bad Gateway`. Điều này có nghĩa là gì và bạn nên debug ở đâu?
+
+a) Client gửi request sai format — cần sửa phía client
+b) Server không tìm thấy endpoint — cần kiểm tra URL
+c) Reverse proxy (nginx/load balancer) không kết nối được đến backend service — cần debug backend
+d) Client chưa authenticate — cần gửi lại token
+
+**Đáp án: c)**
+
+**Giải thích:**
+- `502 Bad Gateway` xảy ra khi một proxy/gateway (nginx, load balancer) nhận request nhưng không nhận được response hợp lệ từ upstream server (backend app).
+- Nơi debug: kiểm tra backend service có đang chạy không, nginx log, kết nối giữa nginx và backend.
+- a) Sai — request sai format trả về `400 Bad Request`.
+- b) Sai — không tìm thấy endpoint trả về `404 Not Found`.
+- d) Sai — chưa authenticate trả về `401 Unauthorized`.
 
 ---
 
-### Câu 1 (Trắc nghiệm)
+## Câu 2 (trắc nghiệm)
 
-**HTTP sử dụng port mặc định nào?**
+Tại sao HTTPS cần Certificate từ một CA (Certificate Authority) được tin tưởng, thay vì tự ký (self-signed)?
 
-A) 443  
-B) 80  
-C) 8080  
-D) 22  
+a) Self-signed certificate không thể mã hóa dữ liệu được
+b) CA certificate nhanh hơn và ít tốn tài nguyên hơn
+c) CA xác minh bạn thực sự sở hữu domain đó — tránh giả mạo. Self-signed thì ai cũng có thể tạo cho bất kỳ domain nào
+d) Self-signed certificate không hỗ trợ HTTP/2
 
-**Đáp án: B) 80**
+**Đáp án: c)**
 
----
-
-### Câu 2 (Trắc nghiệm)
-
-**HTTPS bảo mật dữ liệu bằng cách nào?**
-
-A) Nén dữ liệu trước khi gửi  
-B) Mã hóa dữ liệu bằng TLS/SSL  
-C) Xác thực địa chỉ IP của client  
-D) Giới hạn số lượng kết nối đồng thời  
-
-**Đáp án: B) Mã hóa dữ liệu bằng TLS/SSL**
+**Giải thích:**
+- CA đóng vai trò "người chứng nhận" — họ kiểm tra bạn thực sự kiểm soát domain trước khi cấp certificate. Browser tin tưởng CA → tin tưởng certificate của bạn.
+- Self-signed: bạn tự ký certificate, không ai xác minh bạn thực sự là chủ domain. Kẻ tấn công có thể tạo self-signed certificate cho `google.com` và lừa đảo.
+- a) Sai — self-signed vẫn mã hóa được hoàn toàn, chỉ không được tin tưởng về danh tính.
+- b) Sai — không liên quan đến tốc độ hay tài nguyên.
+- d) Sai — HTTP/2 không liên quan đến loại certificate.
 
 ---
 
-### Câu 3 (Tự luận ngắn)
+## Câu 3 (tự luận)
 
-**Tại sao các website ngân hàng và thương mại điện tử bắt buộc phải dùng HTTPS thay vì HTTP?**
+Giải thích bằng lời: sự khác nhau giữa `401 Unauthorized` và `403 Forbidden` là gì? Cho ví dụ thực tế cho từng trường hợp.
 
 **Đáp án gợi ý:**
 
-HTTP truyền dữ liệu dưới dạng plaintext (văn bản thô), không được mã hóa — kẻ tấn công có thể thực hiện **man-in-the-middle attack** để đọc hoặc chỉnh sửa dữ liệu đang truyền (ví dụ: username, password, số thẻ tín dụng).
+`401 Unauthorized` — "Tôi không biết bạn là ai." Server chưa xác định được danh tính của bạn. Thường kèm header `WWW-Authenticate` gợi ý cách auth.
+- Ví dụ: Gọi API không kèm token, hoặc token sai/hết hạn → server không biết đây là ai.
 
-HTTPS sử dụng TLS/SSL để **mã hóa toàn bộ dữ liệu** giữa client và server, đồng thời **xác thực danh tính server** qua certificate — đảm bảo người dùng đang kết nối đúng server thật, không phải server giả mạo.
+`403 Forbidden` — "Tôi biết bạn là ai, nhưng bạn không có quyền làm điều này." Server đã xác định được danh tính nhưng từ chối vì không đủ permission.
+- Ví dụ: User thường đăng nhập thành công (token hợp lệ) nhưng cố gọi API chỉ dành cho admin → 403.
+
+Cách phân biệt khi debug: nếu 401 → kiểm tra auth (token có không, có đúng không, có hết hạn không). Nếu 403 → kiểm tra permission/role của user trong hệ thống.

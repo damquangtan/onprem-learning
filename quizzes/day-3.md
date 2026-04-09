@@ -1,46 +1,61 @@
-## Quiz: DNS Hoạt Động Như Thế Nào
+# 📝 Quiz: DNS hoạt động như thế nào
+
+## Câu 1 (trắc nghiệm)
+
+Bạn vừa đổi DNS record của `api.myapp.com` từ IP cũ sang IP mới. Sau 30 phút, một số user vẫn bị điều hướng đến server cũ. Nguyên nhân khả năng nhất là gì?
+
+a) DNS propagation chưa xong do lỗi của nhà cung cấp DNS
+b) DNS record cũ có TTL cao (ví dụ: 3600 giây), client đang dùng cache chưa expire
+c) User đó đang dùng VPN nên DNS bị chặn
+d) Cần xóa DNS record cũ trước khi tạo record mới
+
+**Đáp án: b)**
+
+**Giải thích:**
+- TTL (Time To Live) quy định bao lâu DNS resolver được phép cache kết quả. TTL = 3600 → cache 1 giờ. User đã query trước khi bạn đổi → đang dùng cache cũ trỏ về IP cũ.
+- a) Sai — DNS propagation thường xảy ra trong vài phút khi bạn save record. Vấn đề là client cache, không phải propagation.
+- c) Sai — VPN thay đổi DNS resolver nhưng vẫn bị ảnh hưởng bởi TTL.
+- d) Sai — không cần xóa trước. Khi update record, record mới ghi đè record cũ.
+
+**Bài học thực tế:** Trước khi migration, hạ TTL xuống 300 (5 phút) và chờ ít nhất bằng TTL cũ. Sau đó đổi IP → chỉ cần chờ 5 phút là user thấy IP mới.
 
 ---
 
-### Câu 1 — Trắc nghiệm
+## Câu 2 (trắc nghiệm)
 
-**Khi bạn gõ `google.com` vào trình duyệt, thứ tự tra cứu DNS nào là đúng?**
+Lệnh nào cho phép bạn query DNS và xem toàn bộ quá trình từ Root Server → TLD → Authoritative DNS?
 
-A. Root DNS → TLD DNS → Authoritative DNS → Recursive Resolver  
-B. Recursive Resolver → Cache → Root DNS → TLD DNS → Authoritative DNS  
-C. Authoritative DNS → TLD DNS → Root DNS → Recursive Resolver  
-D. Cache → Authoritative DNS → Root DNS → TLD DNS  
+a) `nslookup -debug google.com`
+b) `dig +trace google.com`
+c) `dig @8.8.8.8 google.com`
+d) `host -v google.com`
 
-**Đáp án: B**
+**Đáp án: b) `dig +trace google.com`**
 
-> Trình duyệt hỏi Recursive Resolver (thường do ISP cung cấp). Resolver kiểm tra cache trước; nếu không có thì hỏi Root DNS → TLD DNS (`.com`) → Authoritative DNS của `google.com` để lấy địa chỉ IP.
-
----
-
-### Câu 2 — Trắc nghiệm
-
-**Record DNS nào dùng để ánh xạ tên miền sang địa chỉ IPv4?**
-
-A. AAAA  
-B. CNAME  
-C. A  
-D. MX  
-
-**Đáp án: C**
-
-> `A record` ánh xạ domain → IPv4. `AAAA record` ánh xạ domain → IPv6. `CNAME` là alias trỏ tên miền này sang tên miền khác. `MX` dùng cho mail server.
+**Giải thích:**
+- `dig +trace` thực hiện iterative query: query Root Server trước, nhận danh sách TLD server, query TLD, nhận Authoritative server, query Authoritative → hiện từng bước.
+- a) Sai — `nslookup -debug` hiện thêm thông tin nhưng không trace từng bước như +trace.
+- c) Sai — `dig @8.8.8.8` chỉ query thẳng đến 8.8.8.8 và nhận kết quả cuối, không trace.
+- d) Sai — `host -v` hiện verbose output nhưng không trace qua các tầng DNS.
 
 ---
 
-### Câu 3 — Tự luận ngắn
+## Câu 3 (tự luận)
 
-**TTL (Time To Live) trong DNS là gì? Nếu TTL của một record được đặt quá thấp, điều gì sẽ xảy ra?**
+Giải thích sự khác nhau giữa file `/etc/hosts` và DNS server. Khi nào bạn nên dùng `/etc/hosts`? Có rủi ro gì không?
 
-**Đáp án:**
+**Đáp án gợi ý:**
 
-TTL là khoảng thời gian (tính bằng giây) mà một DNS record được phép lưu trong cache trước khi bị xóa và phải tra cứu lại. Ví dụ `TTL = 300` nghĩa là cache tồn tại trong 5 phút.
+`/etc/hosts` là file text trên máy local, map hostname → IP trực tiếp. OS check file này **trước** khi query DNS. Bạn có thể thêm bất kỳ mapping nào mà không cần DNS server.
 
-Nếu TTL quá thấp:
-- Cache bị xóa liên tục → mỗi request đều phải tra cứu lại từ đầu
-- Tăng số lượng query đến DNS server → tốn băng thông và làm chậm phản hồi
-- Phù hợp khi cần thay đổi IP nhanh (ví dụ failover), nhưng không nên dùng thường xuyên
+DNS server là hệ thống phân tán — chứa records cho toàn internet hoặc internal network, có TTL, có thể update mà không cần vào từng máy.
+
+Dùng `/etc/hosts` khi:
+- Test local: map `api.myapp.com` → `127.0.0.1` để test trước khi deploy
+- Override DNS: trỏ domain về IP khác để test với production domain
+- Môi trường không có DNS server (máy offline, container đặc biệt)
+
+Rủi ro:
+- Quên xóa entry test → bug khó hiểu khi deploy (app vẫn trỏ về localhost)
+- Không scale được — phải thêm vào từng máy thủ công
+- Không có TTL — override vĩnh viễn cho đến khi xóa thủ công
